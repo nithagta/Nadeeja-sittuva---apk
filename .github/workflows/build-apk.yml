@@ -1,0 +1,182 @@
+name: Build & Release Debug APK
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: 'Publish as a GitHub Release'
+        required: false
+        type: boolean
+        default: true
+      release_tag:
+        description: 'Release tag (e.g. v1.0.0 or latest)'
+        required: false
+        default: 'latest-debug'
+      release_title:
+        description: 'Release Title'
+        required: false
+        default: 'Sittuva Debug APK'
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    name: Build & Package Debug APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Prepare Environment Files
+        run: |
+          echo "Setting up .env file..."
+          if [ ! -f .env ]; then
+            if [ -f .env.example ]; then
+              cp .env.example .env
+            else
+              touch .env
+            fi
+          fi
+
+          echo "Setting up debug.keystore..."
+          if [ ! -f debug.keystore ]; then
+            if [ -f debug.keystore.base64 ]; then
+              echo "Decoding debug.keystore from base64..."
+              base64 -d debug.keystore.base64 > debug.keystore
+            else
+              echo "Generating standard Android debug keystore..."
+              keytool -genkey -v -keystore debug.keystore \
+                -storepass android -alias androiddebugkey -keypass android \
+                -keyalg RSA -keysize 2048 -validity 10000 \
+                -dname "CN=Android Debug,O=Android,C=US"
+            fi
+          fi
+
+      - name: Grant Execute Permission to gradlew
+        run: chmod +x gradlew
+
+      - name: Run Unit Tests
+        run: ./gradlew testDebugUnitTest --continue
+
+      - name: Build Debug APK
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: Organize & Verify APK Outputs
+        id: organize_apk
+        run: |
+          OUTPUT_DIR="app/build/outputs/apk/debug"
+          SRC_APK="$OUTPUT_DIR/app-debug.apk"
+          DEST_APK="$OUTPUT_DIR/sittuva-debug.apk"
+
+          if [ -f "$SRC_APK" ]; then
+            cp "$SRC_APK" "$DEST_APK"
+            APK_SIZE=$(du -h "$DEST_APK" | cut -f1)
+            APK_SHA=$(sha256sum "$DEST_APK" | cut -d ' ' -f1)
+            echo "apk_path=$DEST_APK" >> "$GITHUB_OUTPUT"
+            echo "apk_size=$APK_SIZE" >> "$GITHUB_OUTPUT"
+            echo "apk_sha=$APK_SHA" >> "$GITHUB_OUTPUT"
+            echo "Successfully prepared $DEST_APK ($APK_SIZE)"
+          else
+            echo "Error: app-debug.apk not found in $OUTPUT_DIR!"
+            exit 1
+          fi
+
+      - name: Upload APK as Workflow Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sittuva-debug-apk
+          path: app/build/outputs/apk/debug/sittuva-debug.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Generate Job Summary
+        run: |
+          echo "## 🇱🇰 Sittuva Android App — Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "| :--- | :--- |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Package Name** | \`com.aistudio.sittuva.nwdpke\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **App Name** | **Sittuva (සිට්ටුව)** |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Build Type** | \`debug\` (Signed with debug keystore) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Binary Name** | \`sittuva-debug.apk\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **File Size** | \`${{ steps.organize_apk.outputs.apk_size }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **SHA-256** | \`${{ steps.organize_apk.outputs.apk_sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📥 How to Download:" >> $GITHUB_STEP_SUMMARY
+          echo "1. Go to the **Summary** tab of this GitHub Actions run." >> $GITHUB_STEP_SUMMARY
+          echo "2. Scroll down to **Artifacts** and download \`sittuva-debug-apk.zip\`." >> $GITHUB_STEP_SUMMARY
+          echo "3. Or check the **Releases** tab for direct \`.apk\` download links." >> $GITHUB_STEP_SUMMARY
+
+      - name: Determine Release Tag & Details
+        id: release_meta
+        if: startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || (github.event_name == 'workflow_dispatch' && github.event.inputs.create_release == 'true')
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            TAG_NAME="${GITHUB_REF#refs/tags/}"
+            TITLE="Sittuva Release $TAG_NAME"
+            PRERELEASE="false"
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            TAG_NAME="${{ github.event.inputs.release_tag }}"
+            TITLE="${{ github.event.inputs.release_title }}"
+            PRERELEASE="false"
+          else
+            TAG_NAME="latest-debug"
+            TITLE="Sittuva Latest Debug Build"
+            PRERELEASE="true"
+          fi
+          echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
+          echo "release_title=$TITLE" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
+
+      - name: Publish Direct Download APK to GitHub Releases
+        if: steps.release_meta.outputs.tag_name != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release_meta.outputs.tag_name }}
+          name: ${{ steps.release_meta.outputs.release_title }}
+          files: app/build/outputs/apk/debug/sittuva-debug.apk
+          body: |
+            ## 🇱🇰 Sittuva (සිට්ටුව) — Android Debug APK
+            
+            This release provides the direct installable APK for **Sittuva**.
+            
+            ### 📱 App Details
+            - **App Name:** Sittuva (සිට්ටුව)
+            - **Application ID:** `com.aistudio.sittuva.nwdpke`
+            - **Target Android Version:** Android 7.0+ (API 24 to 36)
+            - **Build Type:** Debug APK (Signed with development keystore)
+            - **File:** `sittuva-debug.apk`
+            - **SHA-256:** `${{ steps.organize_apk.outputs.apk_sha }}`
+            
+            ### ⬇️ Installation Instructions:
+            1. Download `sittuva-debug.apk` from the Assets below directly onto your Android device.
+            2. If prompted, allow "Install unknown apps" in your Android security settings.
+            3. Tap to install and launch **Sittuva**!
+          prerelease: ${{ steps.release_meta.outputs.prerelease == 'true' }}
+          draft: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

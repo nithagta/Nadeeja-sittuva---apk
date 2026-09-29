@@ -1,0 +1,6 @@
+{
+  "name": "Sittuva",
+  "description": "Sri Lankan rotating savings & group contribution platform (සිට්ටුව)",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
